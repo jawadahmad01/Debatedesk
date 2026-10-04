@@ -8,6 +8,20 @@ export type TurnKind =
   | 'round_summary' 
   | 'judge_verdict';
 
+export interface DebateTurnToolSource {
+  title?: string;
+  url?: string;
+  snippet?: string;
+}
+
+export interface DebateTurnToolCall {
+  name: string;
+  query?: string;
+  status: 'running' | 'success' | 'error';
+  sources?: DebateTurnToolSource[];
+  error?: string;
+}
+
 export interface DebateTurn {
   id: string;
   round: number;
@@ -19,6 +33,8 @@ export interface DebateTurn {
   keyPoints?: string[];
   targetedAgent?: 'pro' | 'con' | 'both';
   timestamp: string;
+  toolCall?: DebateTurnToolCall;
+  toolCalls?: DebateTurnToolCall[];
 }
 
 export interface JudgeVerdict {

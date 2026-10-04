@@ -13,7 +13,16 @@
  * - No Groq API keys are stored or exposed in this frontend code.
  */
 
-import { DebateSession } from '../types/debate';
+import { 
+  DebateSession, 
+  DebateTurn, 
+  AgentRole, 
+  TurnKind, 
+  VerdictType, 
+  JudgeVerdict,
+  DebateTurnToolCall,
+  DebateTurnToolSource
+} from '../types/debate';
 import { 
   StartDebatePayload, 
   BackendIntegrationError, 
@@ -127,8 +136,9 @@ class RealBackendDebateService implements IDebateService {
       });
     }
 
-    // Validate that response contains required debate session fields
-    if (!this.isValidDebateSession(data)) {
+    // Normalize and validate that response contains required debate session fields
+    const session = this.normalizeBackendSession(data, payload);
+    if (!session) {
       throw new BackendIntegrationError({
         type: 'invalid_response',
         message: 'Backend returned JSON, but it does not match the DebateSession schema expected by the frontend.',
@@ -136,8 +146,8 @@ class RealBackendDebateService implements IDebateService {
       });
     }
 
-    this.inMemorySessions.set(data.id, data);
-    return data;
+    this.inMemorySessions.set(session.id, session);
+    return session;
   }
 
   public getSession(id: string): DebateSession | null {
@@ -149,17 +159,167 @@ class RealBackendDebateService implements IDebateService {
   }
 
   /**
-   * Runtime type guard to ensure response conforms to DebateSession contract
+   * Robust normalizer that accepts either camelCase or snake_case payloads from Python
+   * (e.g. FastAPI / Pydantic models), extracts tool-call executions, and validates schema.
    */
-  private isValidDebateSession(obj: unknown): obj is DebateSession {
-    if (!obj || typeof obj !== 'object') return false;
-    const s = obj as Partial<DebateSession>;
-    return (
-      typeof s.id === 'string' &&
-      typeof s.question === 'string' &&
-      Array.isArray(s.transcript) &&
-      typeof s.totalRounds === 'number'
-    );
+  private normalizeBackendSession(raw: unknown, payload: StartDebatePayload): DebateSession | null {
+    if (!raw || typeof raw !== 'object') return null;
+
+    // Unwrap envelope if backend returned { session: { ... } } or { data: { ... } }
+    const root = (raw as Record<string, unknown>).session || (raw as Record<string, unknown>).data || raw;
+    if (!root || typeof root !== 'object') return null;
+
+    const r = root as Record<string, unknown>;
+
+    const question = typeof r.question === 'string' ? r.question : payload.question;
+    const transcriptRaw = Array.isArray(r.transcript) ? r.transcript : null;
+
+    if (!transcriptRaw) {
+      return null;
+    }
+
+    const totalRounds = typeof r.totalRounds === 'number' 
+      ? r.totalRounds 
+      : typeof r.total_rounds === 'number' 
+      ? r.total_rounds 
+      : payload.rounds;
+
+    const currentRound = typeof r.currentRound === 'number' 
+      ? r.currentRound 
+      : typeof r.current_round === 'number' 
+      ? r.current_round 
+      : totalRounds;
+
+    // Normalize turns including optional tool execution details
+    const transcript: DebateTurn[] = transcriptRaw.map((tRaw, idx): DebateTurn => {
+      if (!tRaw || typeof tRaw !== 'object') {
+        return {
+          id: `turn-${idx}`,
+          round: 1,
+          agentRole: 'pro' as AgentRole,
+          agentName: 'Agent',
+          kind: 'argument' as TurnKind,
+          title: `Turn #${idx + 1}`,
+          content: String(tRaw),
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        };
+      }
+      const t = tRaw as Record<string, unknown>;
+      
+      const roleRaw = String(t.agentRole || t.agent_role || 'pro').toLowerCase();
+      const role: AgentRole = (roleRaw === 'con' || roleRaw === 'moderator' || roleRaw === 'judge') ? (roleRaw as AgentRole) : 'pro';
+
+      // Parse tool call if present
+      const toolArray = Array.isArray(t.toolCalls) ? (t.toolCalls as unknown[]) : Array.isArray(t.tool_calls) ? (t.tool_calls as unknown[]) : null;
+      const rawTool = t.toolCall || t.tool_call || (toolArray && toolArray.length > 0 ? toolArray[0] : null);
+      
+      let toolCall: DebateTurnToolCall | undefined = undefined;
+      if (rawTool && typeof rawTool === 'object') {
+        const tc = rawTool as Record<string, unknown>;
+        const rawStatus = String(tc.status || 'success').toLowerCase();
+        const status: DebateTurnToolCall['status'] = (rawStatus === 'running' || rawStatus === 'error') ? rawStatus : 'success';
+        
+        let sources: DebateTurnToolSource[] | undefined = undefined;
+        const rawSources = tc.sources || tc.results;
+        if (Array.isArray(rawSources)) {
+          sources = rawSources.map((s): DebateTurnToolSource => {
+            if (typeof s === 'string') return { title: s };
+            if (s && typeof s === 'object') {
+              const src = s as Record<string, unknown>;
+              return {
+                title: typeof src.title === 'string' ? src.title : undefined,
+                url: typeof src.url === 'string' ? src.url : undefined,
+                snippet: typeof src.snippet === 'string' ? src.snippet : typeof src.content === 'string' ? src.content : undefined,
+              };
+            }
+            return { title: String(s) };
+          });
+        }
+
+        toolCall = {
+          name: String(tc.name || tc.tool_name || tc.tool || 'tool'),
+          query: typeof tc.query === 'string' ? tc.query : typeof tc.input === 'string' ? tc.input : undefined,
+          status,
+          sources,
+          error: typeof tc.error === 'string' ? tc.error : typeof tc.error_message === 'string' ? tc.error_message : undefined,
+        };
+      }
+
+      const kindRaw = String(t.kind || 'argument');
+      const kind: TurnKind = (kindRaw === 'moderator_question' || kindRaw === 'round_summary' || kindRaw === 'judge_verdict') 
+        ? (kindRaw as TurnKind) 
+        : 'argument';
+
+      const keyPointsList = Array.isArray(t.keyPoints) 
+        ? (t.keyPoints as string[]) 
+        : Array.isArray(t.key_points) 
+        ? (t.key_points as string[]) 
+        : undefined;
+
+      return {
+        id: String(t.id || `turn-${idx + 1}`),
+        round: typeof t.round === 'number' ? t.round : 1,
+        agentRole: role,
+        agentName: String(t.agentName || t.agent_name || (role === 'pro' ? 'Pro Agent' : role === 'con' ? 'Con Agent' : role === 'moderator' ? 'Moderator' : 'Judge')),
+        kind,
+        title: String(t.title || `Round ${t.round || 1} Statement`),
+        content: String(t.content || ''),
+        keyPoints: keyPointsList,
+        targetedAgent: (t.targetedAgent || t.targeted_agent) as any,
+        timestamp: String(t.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })),
+        toolCall,
+      };
+    });
+
+    // Parse verdict if provided
+    let verdict: JudgeVerdict | undefined = undefined;
+    const vRaw = r.verdict;
+    if (vRaw && typeof vRaw === 'object') {
+      const v = vRaw as Record<string, unknown>;
+      const vTypeRaw = String(v.verdict || 'Conditional').toLowerCase();
+      const vType: VerdictType = vTypeRaw === 'yes' ? 'Yes' : vTypeRaw === 'no' ? 'No' : 'Conditional';
+
+      const decidingFactorsList: string[] = Array.isArray(v.decidingFactors) 
+        ? (v.decidingFactors as string[]) 
+        : Array.isArray(v.deciding_factors) 
+        ? (v.deciding_factors as string[]) 
+        : [];
+
+      const recommendationsList: string[] = Array.isArray(v.actionableRecommendations) 
+        ? (v.actionableRecommendations as string[]) 
+        : Array.isArray(v.actionable_recommendations) 
+        ? (v.actionable_recommendations as string[]) 
+        : [];
+
+      verdict = {
+        verdict: vType,
+        confidence: typeof v.confidence === 'number' ? v.confidence : 80,
+        summary: String(v.summary || 'Deliberation concluded with consensus.'),
+        decidingFactors: decidingFactorsList,
+        risks: Array.isArray(v.risks) ? (v.risks as string[]) : [],
+        reasoning: String(v.reasoning || ''),
+        actionableRecommendations: recommendationsList,
+      };
+    }
+
+    const sessionStatus: DebateSession['status'] = 
+      r.status === 'completed' || verdict ? 'completed' : 
+      r.status === 'paused' ? 'paused' : 'debating';
+
+    return {
+      id: String(r.id || `backend-debate-${Date.now()}`),
+      question,
+      backgroundContext: typeof r.backgroundContext === 'string' ? r.backgroundContext : typeof r.background_context === 'string' ? r.background_context : payload.context,
+      decisionCriteria: typeof r.decisionCriteria === 'string' ? r.decisionCriteria : typeof r.decision_criteria === 'string' ? r.decision_criteria : payload.criteria,
+      totalRounds,
+      currentRound,
+      status: sessionStatus,
+      currentTurnIndex: typeof r.currentTurnIndex === 'number' ? r.currentTurnIndex : transcript.length,
+      transcript,
+      verdict,
+      createdAt: String(r.createdAt || r.created_at || new Date().toISOString()),
+      isDemo: false,
+    };
   }
 }
 

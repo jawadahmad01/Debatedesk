@@ -18,6 +18,7 @@ import {
   Info
 } from 'lucide-react';
 import { DebateSession, DebateTurn, JudgeVerdict } from '../types/debate';
+import { ToolCallDisplay } from './ToolCallDisplay';
 
 interface ActiveDebateViewProps {
   session: DebateSession;
@@ -323,6 +324,7 @@ const TranscriptTurnCard: React.FC<TranscriptTurnCardProps> = ({ turn, isLatest 
         <div className="bg-slate-950/80 rounded-lg p-4 border border-cyan-900/50 text-sm sm:text-base text-cyan-100 leading-relaxed italic">
           "{content}"
         </div>
+        <ToolCallDisplay toolCall={turn.toolCall} toolCalls={turn.toolCalls} />
       </div>
     );
   }
@@ -349,6 +351,8 @@ const TranscriptTurnCard: React.FC<TranscriptTurnCardProps> = ({ turn, isLatest 
         <p className="text-sm text-slate-200 leading-relaxed mb-3">
           {content}
         </p>
+
+        <ToolCallDisplay toolCall={turn.toolCall} toolCalls={turn.toolCalls} />
 
         <div className="pt-2.5 text-[11px] font-mono text-slate-400 flex items-center justify-between border-t border-slate-800/80">
           <span className="text-slate-300">Round {turn.round} Deliberation Concluded</span>
@@ -394,6 +398,8 @@ const TranscriptTurnCard: React.FC<TranscriptTurnCardProps> = ({ turn, isLatest 
             ))}
           </div>
         )}
+
+        <ToolCallDisplay toolCall={turn.toolCall} toolCalls={turn.toolCalls} />
       </div>
     );
   }
@@ -433,6 +439,8 @@ const TranscriptTurnCard: React.FC<TranscriptTurnCardProps> = ({ turn, isLatest 
           ))}
         </div>
       )}
+
+      <ToolCallDisplay toolCall={turn.toolCall} toolCalls={turn.toolCalls} />
     </div>
   );
 };
